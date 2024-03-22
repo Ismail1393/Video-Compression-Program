@@ -1,0 +1,317 @@
+#include <dirent.h>
+#include <stdio.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <zlib.h>
+#include <time.h>
+#include <pthread.h>
+
+#define BUFFER_SIZE 1048576 // 1MB
+
+struct thread_data
+{
+	z_stream *strm;
+	unsigned char *buffer_out;
+	char *path;
+	int total_in;
+	int ret;
+};
+
+void *test(void *strm);
+
+void build_path(char *path, char *folder, char *file);
+
+int cmp(const void *a, const void *b)
+{
+	return strcmp(*(char **)a, *(char **)b);
+}
+
+int main(int argc, char **argv)
+{
+	// time computation header
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	// end of time computation header
+
+	// do not modify the main function before this point!
+
+	assert(argc == 2);
+
+	DIR *d;
+	struct dirent *dir;
+	char **files = NULL;
+	int nfiles = 0;
+
+	d = opendir(argv[1]);
+	if (d == NULL)
+	{
+		printf("An error has occurred\n");
+		return 0;
+	}
+
+	// create sorted list of PPM files
+	while ((dir = readdir(d)) != NULL)
+	{
+		files = realloc(files, (nfiles + 1) * sizeof(char *));
+		assert(files != NULL);
+
+		int len = strlen(dir->d_name);
+		if (dir->d_name[len - 4] == '.' && dir->d_name[len - 3] == 'p' && dir->d_name[len - 2] == 'p' && dir->d_name[len - 1] == 'm')
+		{
+			files[nfiles] = strdup(dir->d_name);
+			assert(files[nfiles] != NULL);
+
+			nfiles++;
+		}
+	}
+	closedir(d);
+	qsort(files, nfiles, sizeof(char *), cmp);
+
+	// create a single zipped package with all PPM files in lexicographical order
+	char *folder = argv[1];
+
+	int total_in_one = 0, total_in_two = 0, total_out = 0;
+	FILE *f_out = fopen("video.vzip", "w");
+	assert(f_out != NULL);
+	for (int i = 0; i < nfiles; i += 4)
+	{
+		int len_one = strlen(folder) + strlen(files[i]) + 2;
+		char *path_one = malloc(len_one * sizeof(char));
+		build_path(path_one, folder, files[i]);
+
+		int len_two = strlen(folder) + strlen(files[i + 1]) + 2;
+		char *path_two = malloc(len_two * sizeof(char));
+		build_path(path_two, folder, files[i + 1]);
+
+		int len_three = strlen(folder) + strlen(files[i + 2]) + 2;
+		char *path_three = malloc(len_three * sizeof(char));
+		build_path(path_three, folder, files[i + 2]);
+
+		int len_four = strlen(folder) + strlen(files[i + 3]) + 2;
+		char *path_four = malloc(len_four * sizeof(char));
+		build_path(path_four, folder, files[i + 3]);
+
+		unsigned char buffer_out_one[BUFFER_SIZE];
+		unsigned char buffer_out_two[BUFFER_SIZE];
+		unsigned char buffer_out_three[BUFFER_SIZE];
+		unsigned char buffer_out_four[BUFFER_SIZE];
+
+		z_stream strm_one, strm_two, strm_three, strm_four;
+
+		struct thread_data data_one, data_two, data_three, data_four;
+
+		data_one.buffer_out = &buffer_out_one;
+		data_one.strm = &strm_one;
+		data_one.path = path_one;
+
+		data_two.buffer_out = &buffer_out_two;
+		data_two.strm = &strm_two;
+		data_two.path = path_two;
+
+		data_three.buffer_out = &buffer_out_three;
+		data_three.strm = &strm_three;
+		data_three.path = path_three;
+
+		data_four.buffer_out = &buffer_out_four;
+		data_four.strm = &strm_four;
+		data_four.path = path_four;
+
+		pthread_t thread1, thread2, thread3, thread4;
+
+		pthread_create(&thread1, NULL, test, (void *)&data_one);
+		pthread_create(&thread2, NULL, test, (void *)&data_two);
+		pthread_create(&thread3, NULL, test, (void *)&data_three);
+		pthread_create(&thread4, NULL, test, (void *)&data_four);
+
+		pthread_join(thread1, NULL);
+		pthread_join(thread2, NULL);
+		pthread_join(thread3, NULL);
+		pthread_join(thread4, NULL);
+
+		total_in_one += data_one.total_in;
+		total_in_one += data_two.total_in;
+		total_in_one += data_three.total_in;
+		total_in_one += data_four.total_in;
+
+		// assert(ret_one == Z_STREAM_END && ret_two == Z_STREAM_END);
+
+		// dump zipped file
+		int nbytes_zipped_one = BUFFER_SIZE - strm_one.avail_out;
+		fwrite(&nbytes_zipped_one, sizeof(int), 1, f_out);
+		fwrite(buffer_out_one, sizeof(unsigned char), nbytes_zipped_one, f_out);
+		total_out += nbytes_zipped_one;
+
+		int nbytes_zipped_two = BUFFER_SIZE - strm_two.avail_out;
+		fwrite(&nbytes_zipped_two, sizeof(int), 1, f_out);
+		fwrite(buffer_out_two, sizeof(unsigned char), nbytes_zipped_two, f_out);
+		total_out += nbytes_zipped_two;
+
+		int nbytes_zipped_three = BUFFER_SIZE - strm_three.avail_out;
+		fwrite(&nbytes_zipped_three, sizeof(int), 1, f_out);
+		fwrite(buffer_out_three, sizeof(unsigned char), nbytes_zipped_three, f_out);
+		total_out += nbytes_zipped_three;
+
+		int nbytes_zipped_four = BUFFER_SIZE - strm_four.avail_out;
+		fwrite(&nbytes_zipped_four, sizeof(int), 1, f_out);
+		fwrite(buffer_out_four, sizeof(unsigned char), nbytes_zipped_four, f_out);
+		total_out += nbytes_zipped_four;
+
+		free(path_one);
+		free(path_two);
+		free(path_three);
+		free(path_four);
+	}
+	fclose(f_out);
+
+	printf("Compression rate: %.2lf%%\n", 100.0 * (total_in_one - total_out) / total_in_one);
+
+	// release list of files
+	for (int i = 0; i < nfiles; i++)
+		free(files[i]);
+	free(files);
+
+	// do not modify the main function after this point!
+
+	// time computation footer
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	printf("Time: %.2f seconds\n", ((double)end.tv_sec + 1.0e-9 * end.tv_nsec) - ((double)start.tv_sec + 1.0e-9 * start.tv_nsec));
+	// end of time computation footer
+
+	return 0;
+}
+
+void build_path(char *path, char *folder, char *file)
+{
+	assert(path != NULL);
+	strcpy(path, folder);
+	strcat(path, "/");
+	strcat(path, file);
+}
+
+void *test(void *data)
+{
+	struct thread_data *d = (struct thread_data *)data;
+
+	z_stream *strm = d->strm;
+	unsigned char *buffer_out = d->buffer_out;
+	char *path = d->path;
+
+	unsigned char buffer_in[BUFFER_SIZE];
+
+	// load file
+	FILE *f_in = fopen(path, "r");
+	assert(f_in != NULL);
+	int nbytes_one = fread(buffer_in, sizeof(unsigned char), BUFFER_SIZE, f_in);
+	fclose(f_in);
+	d->total_in = nbytes_one;
+
+	// zip file
+	int ret_one = deflateInit(strm, 9);
+	assert(ret_one == Z_OK);
+
+	strm->avail_in = nbytes_one;
+	strm->next_in = buffer_in;
+	strm->avail_out = BUFFER_SIZE;
+	strm->next_out = buffer_out;
+
+	int ret = deflate(strm, Z_FINISH);
+
+	assert(ret == Z_STREAM_END);
+
+	// printf("ret: %d\n", d->ret);
+
+	pthread_exit(NULL);
+}
+
+/**
+ *
+ *
+ *
+ * 	for (int i = 0; i < nfiles; i += 2)
+	{
+		int len_one = strlen(folder) + strlen(files[i]) + 2;
+		int len_two = strlen(folder) + strlen(files[i + 1]) + 2;
+		char *path_one = malloc(len_one * sizeof(char));
+		char *path_two = malloc(len_two * sizeof(char));
+		assert(path_one != NULL && path_two != NULL);
+		strcpy(path_one, folder);
+		strcpy(path_two, folder);
+		strcat(path_one, "/");
+		strcat(path_two, "/");
+		strcat(path_one, files[i]);
+		strcat(path_two, files[i + 1]);
+
+		printf("path_one: %s\n", path_one);
+		printf("path_two: %s\n", path_two);
+
+		unsigned char buffer_in_one[BUFFER_SIZE];
+		unsigned char buffer_in_two[BUFFER_SIZE];
+
+		unsigned char buffer_out_one[BUFFER_SIZE];
+		unsigned char buffer_out_two[BUFFER_SIZE];
+
+		// load file
+		FILE *f_in_one = fopen(path_one, "r");
+		FILE *f_in_two = fopen(path_two, "r");
+		assert(f_in_one != NULL && f_in_two != NULL);
+		int nbytes_one = fread(buffer_in_one, sizeof(unsigned char), BUFFER_SIZE, f_in_one);
+		fclose(f_in_one);
+		int nbytes_two = fread(buffer_in_two, sizeof(unsigned char), BUFFER_SIZE, f_in_two);
+		fclose(f_in_two);
+		total_in_one += nbytes_one;
+		total_in_two += nbytes_two;
+
+		// zip file
+		z_stream strm_one, strm_two;
+		int ret_one = deflateInit(&strm_one, 9);
+		int ret_two = deflateInit(&strm_two, 9);
+		assert(ret_one == Z_OK && ret_two == Z_OK);
+
+		strm_one.avail_in = nbytes_one;
+		strm_one.next_in = buffer_in_one;
+		strm_one.avail_out = BUFFER_SIZE;
+		strm_one.next_out = buffer_out_one;
+
+		strm_two.avail_in = nbytes_two;
+		strm_two.next_in = buffer_in_two;
+		strm_two.avail_out = BUFFER_SIZE;
+		strm_two.next_out = buffer_out_two;
+
+		struct thread_data data_one, data_two;
+
+		data_one.strm = &strm_one;
+		data_one.ret = ret_one;
+		data_two.strm = &strm_two;
+		data_two.ret = ret_two;
+
+		pthread_t thread1, thread2;
+
+		pthread_create(&thread1, NULL, test, (void *)&data_one);
+		pthread_create(&thread2, NULL, test, (void *)&data_two);
+
+		pthread_join(thread1, NULL);
+		pthread_join(thread2, NULL);
+
+		// printf("ret_one: %d\n", ret_one);
+		// printf("ret_two: %d\n", ret_two);
+		// printf("z_stream_end: %d\n", Z_STREAM_END);
+
+		// assert(ret_one == Z_STREAM_END && ret_two == Z_STREAM_END);
+
+		// dump zipped file
+		int nbytes_zipped_one = BUFFER_SIZE - strm_one.avail_out;
+		fwrite(&nbytes_zipped_one, sizeof(int), 1, f_out);
+		fwrite(buffer_out_one, sizeof(unsigned char), nbytes_zipped_one, f_out);
+		total_out += nbytes_zipped_one;
+
+		free(path_one);
+
+		int nbytes_zipped_two = BUFFER_SIZE - strm_two.avail_out;
+		fwrite(&nbytes_zipped_two, sizeof(int), 1, f_out);
+		fwrite(buffer_out_two, sizeof(unsigned char), nbytes_zipped_two, f_out);
+		total_out += nbytes_zipped_two;
+
+		free(path_two);
+	}
+*/
